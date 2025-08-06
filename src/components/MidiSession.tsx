@@ -14,6 +14,7 @@ export default function MidiSession() {
 
   const {
     isConnected,
+    isReconnecting,
     participantCount,
     midiInputs,
     midiOutputs,
@@ -77,12 +78,20 @@ export default function MidiSession() {
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center space-x-3">
             <div className={`w-3 h-3 rounded-full ${
+              isReconnecting ? 'bg-yellow-500 animate-pulse' :
               isConnected ? 'bg-green-500' : 'bg-red-500'
             }`}></div>
             <span className="text-sm font-medium text-gray-700">
-              {isConnected ? '연결됨' : '연결 끊김'}
+              {isReconnecting ? '재연결 중...' :
+               isConnected ? '연결됨' : '연결 끊김'}
             </span>
-            {isConnected ? <Wifi className="w-4 h-4 text-green-600" /> : <WifiOff className="w-4 h-4 text-red-600" />}
+            {isReconnecting ? (
+              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-yellow-600"></div>
+            ) : isConnected ? (
+              <Wifi className="w-4 h-4 text-green-600" />
+            ) : (
+              <WifiOff className="w-4 h-4 text-red-600" />
+            )}
           </div>
           <div className="flex items-center space-x-2">
             <Users className="w-4 h-4 text-gray-600" />

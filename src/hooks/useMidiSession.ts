@@ -31,11 +31,17 @@ export function useMidiSession(sessionId: string | null) {
   const [selectedOutput, setSelectedOutput] = useState<string | null>(null)
   const [midiActivity, setMidiActivity] = useState<MidiActivity[]>([])
   const [isMidiInitialized, setIsMidiInitialized] = useState(false)
+  const [isReconnecting, setIsReconnecting] = useState(false)
   
   const supabaseRef = useRef<any>(null) // eslint-disable-line @typescript-eslint/no-explicit-any
   const channelRef = useRef<any>(null) // eslint-disable-line @typescript-eslint/no-explicit-any
   const midiAccessRef = useRef<MIDIAccess | null>(null)
   const userIdRef = useRef<string>(generateUserId())
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const reconnectAttemptsRef = useRef(0)
+  const maxReconnectAttempts = 5
+  const baseReconnectDelay = 1000 // 1초
 
   function generateUserId() {
     return 'user_' + Math.random().toString(36).substring(2, 15)
@@ -51,6 +57,82 @@ export function useMidiSession(sessionId: string | null) {
   const addActivity = useCallback((message: string) => {
     const timestamp = new Date().toLocaleTimeString()
     setMidiActivity(prev => [...prev, { timestamp, message }])
+  }, [])
+
+  // 연결 상태 확인
+  const checkConnectionStatus = useCallback(() => {
+    if (!channelRef.current) return false
+    
+    // Supabase 채널의 상태를 확인
+    const channelState = channelRef.current.state
+    return channelState === 'joined'
+  }, [])
+
+  // 자동 재연결 함수
+  const attemptReconnect = useCallback(async () => {
+    if (isReconnecting || reconnectAttemptsRef.current >= maxReconnectAttempts) {
+      return
+    }
+
+    setIsReconnecting(true)
+    reconnectAttemptsRef.current += 1
+    
+    // 지수 백오프로 재연결 지연 시간 계산
+    const delay = baseReconnectDelay * Math.pow(2, reconnectAttemptsRef.current - 1)
+    
+    addActivity(`연결 재시도 중... (${reconnectAttemptsRef.current}/${maxReconnectAttempts})`)
+    
+    reconnectTimeoutRef.current = setTimeout(async () => {
+      try {
+        // 기존 채널 정리
+        if (channelRef.current) {
+          await channelRef.current.unsubscribe()
+          channelRef.current = null
+        }
+        
+        // 새로운 연결 시도
+        await initializeSupabase()
+        
+      } catch (error) {
+        console.error('재연결 실패:', error)
+        addActivity('재연결 실패: ' + (error as Error).message)
+        
+        // 최대 재시도 횟수에 도달하지 않았다면 다시 시도
+        if (reconnectAttemptsRef.current < maxReconnectAttempts) {
+          setTimeout(() => attemptReconnect(), delay)
+        } else {
+          addActivity('최대 재연결 시도 횟수에 도달했습니다. 페이지를 새로고침해주세요.')
+        }
+      } finally {
+        setIsReconnecting(false)
+      }
+    }, delay)
+  }, [isReconnecting, addActivity])
+
+  // 하트비트 체크
+  const startHeartbeat = useCallback(() => {
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current)
+    }
+    
+    heartbeatIntervalRef.current = setInterval(() => {
+      const isCurrentlyConnected = checkConnectionStatus()
+      
+      if (!isCurrentlyConnected && isConnected) {
+        // 연결이 끊어진 것을 감지
+        setIsConnected(false)
+        addActivity('연결이 끊어졌습니다. 재연결을 시도합니다...')
+        attemptReconnect()
+      }
+    }, 5000) // 5초마다 체크
+  }, [checkConnectionStatus, isConnected, attemptReconnect, addActivity])
+
+  // 하트비트 중지
+  const stopHeartbeat = useCallback(() => {
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current)
+      heartbeatIntervalRef.current = null
+    }
   }, [])
 
   // MIDI 장치 초기화
@@ -171,13 +253,26 @@ export function useMidiSession(sessionId: string | null) {
       await channel.subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
           setIsConnected(true)
+          setIsReconnecting(false)
+          reconnectAttemptsRef.current = 0 // 성공적으로 연결되면 재시도 횟수 리셋
           addActivity('Supabase 연결 성공')
+          
+          // 하트비트 시작
+          startHeartbeat()
           
           // 참여자로 등록
           await channel.track({
             userId: userIdRef.current,
             joinedAt: new Date().toISOString()
           })
+        } else if (status === 'CHANNEL_ERROR') {
+          setIsConnected(false)
+          addActivity('채널 연결 오류가 발생했습니다.')
+          attemptReconnect()
+        } else if (status === 'TIMED_OUT') {
+          setIsConnected(false)
+          addActivity('연결 시간이 초과되었습니다.')
+          attemptReconnect()
         }
       })
 
@@ -185,8 +280,9 @@ export function useMidiSession(sessionId: string | null) {
       console.error('Supabase 초기화 실패:', error)
       addActivity('Supabase 연결 실패: ' + (error as Error).message)
       setIsConnected(false)
+      attemptReconnect()
     }
-  }, [sessionId, addActivity, handleReceivedMidiMessage])
+  }, [sessionId, addActivity, handleReceivedMidiMessage, startHeartbeat, attemptReconnect])
 
   // MIDI 입력 장치 설정
   useEffect(() => {
@@ -220,14 +316,22 @@ export function useMidiSession(sessionId: string | null) {
     initializeSupabase()
 
     return () => {
+      // 정리 작업
+      stopHeartbeat()
+      
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current)
+      }
+      
       if (channelRef.current) {
         channelRef.current.unsubscribe()
       }
     }
-  }, [initializeSupabase])
+  }, [initializeSupabase, stopHeartbeat])
 
   return {
     isConnected,
+    isReconnecting,
     participantCount,
     midiInputs,
     midiOutputs,
