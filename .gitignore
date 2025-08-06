@@ -26,6 +26,3 @@ dist-ssr
 
 # Next.js build output
 .next/
-
-# Development tools
-.trae/
